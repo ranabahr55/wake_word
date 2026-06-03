@@ -9,13 +9,14 @@ Speech recognition runs **fully offline** using OpenAI Whisper (`base.en` model)
 ## Requirements
 
 - Python 3.10+
-- A working microphone
+- A working microphone (stereo mic recommended for sound direction)
 - Internet connection (Microsoft Edge TTS for voice output only)
+- Webcam (optional — for color recognition)
 
 Install dependencies:
 
 ```bash
-pip install pygame faster-whisper pyaudio numpy edge-tts
+pip install pygame faster-whisper pyaudio numpy edge-tts opencv-python
 ```
 
 > On first run the `base.en` Whisper model (~74 MB) is downloaded automatically and cached locally. Every subsequent run is fully offline for recognition.
@@ -28,24 +29,35 @@ pip install pygame faster-whisper pyaudio numpy edge-tts
 python3 car_assistant.py
 ```
 
-The window will show **"Loading Whisper model…"** for a few seconds on first run, then **"Calibrating microphone…"**, then it's ready.
+Startup sequence:
+1. **Loading Whisper model…** — a few seconds on first run
+2. **Calibrating microphone…** — measures room noise floor
+3. **Say a wake phrase to activate** — ready
 
 ---
 
 ## How it works
 
 ### Speech recognition — Whisper (offline)
-Voice is captured directly via PyAudio using energy-based voice activity detection (VAD). When speech is detected, the audio is transcribed locally by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base.en`, int8 quantised). No audio ever leaves the machine.
+Voice is captured via PyAudio using energy-based voice activity detection (VAD). When speech is detected the audio is transcribed locally by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base.en`, int8 quantised). No audio ever leaves the machine.
 
 ### Text-to-speech — Edge TTS (online)
-Responses are spoken using Microsoft's `en-US-GuyNeural` neural voice via [edge-tts](https://github.com/rany2/edge-tts). This requires an internet connection only when the assistant speaks.
+Responses are spoken using Microsoft's `en-US-GuyNeural` neural voice. An internet connection is only required when the assistant speaks.
+
+### Sound direction — stereo mic
+If a stereo microphone is detected, the app compares left and right channel energy on every recording to determine which side the sound came from. The RC car in the orb rotates to face that direction and a glowing arrow appears on the ring around the orb. A `◈ STEREO DIRECTION` badge in the top-left confirms it is active.
+
+### Color recognition — webcam
+If a webcam is connected, OpenCV scans the camera feed at ~8 FPS and identifies dominant colors using HSV color masks. A live preview with a color strip appears in the bottom-right corner. Say **"what color"**, **"what do you see"**, or **"look"** after waking the car to get a spoken color report. If no camera is found the widget shows a placeholder and the voice command responds gracefully.
 
 ---
 
 ## How to use
 
 ### Wake it up
-Say **"Hello Car"** or **"Hey Car"** out loud. The orb lights up, the wave animation appears, and the assistant greets you.
+Say **"Hello Car"** or **"Hey Car"** out loud. The orb lights up, the Siri-style wave animation appears, and the assistant greets you.
+
+If you have a stereo mic, the RC car logo will rotate in the orb to face the direction your voice came from.
 
 ### Give a command
 After it wakes, speak a command. Supported topics:
@@ -62,6 +74,7 @@ After it wakes, speak a command. Supported topics:
 | "Parking" | Find parking |
 | "What time is it" | Current time |
 | "Volume" / "Louder" / "Quieter" | Volume control |
+| "What color" / "What do you see" / "Look" | Color recognition (requires webcam) |
 
 If no command is given within 12 seconds the assistant goes back to sleep automatically.
 
@@ -76,7 +89,7 @@ If no command is given within 12 seconds the assistant goes back to sleep automa
 
 ## Train Voice (bottom-left button)
 
-Calibrates the microphone energy threshold so the assistant responds to your voice level and ignores background noise.
+Calibrates the microphone energy threshold so the assistant responds to your voice and ignores background noise.
 
 1. Click **⚙ Train Voice** on the home screen
 2. Stay quiet for 2 seconds — the room noise floor is measured
@@ -95,7 +108,7 @@ Manage which phrases activate the assistant.
 1. Click **⊞ Wake Phrases** on the home screen
 2. View current phrases (defaults: `"hello car"` and `"hey car"`)
 3. Type a new phrase and press **Enter** or click **ADD**
-4. Click **✕** next to a phrase to remove it (at least one phrase must always remain)
+4. Click **✕** next to a phrase to remove it (at least one must always remain)
 
 All changes save instantly to `config.json`.
 
@@ -138,7 +151,7 @@ Edit `whisper_model` in `config.json` to trade speed for accuracy:
 
 ## Voice
 
-Uses **Microsoft Edge TTS** (`en-US-GuyNeural` by default) — a natural-sounding American male neural voice in his 30s. No API key required. Requires an internet connection to generate audio at response time.
+Uses **Microsoft Edge TTS** (`en-US-GuyNeural` by default) — a natural-sounding American male neural voice. No API key required. Requires an internet connection to generate audio at response time.
 
 To use a different voice, update `"voice"` in `config.json` with any [Edge TTS voice name](https://github.com/rany2/edge-tts).
 
