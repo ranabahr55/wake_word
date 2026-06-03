@@ -1,0 +1,12 @@
+{
+  "wake_phrases": [
+    "hey type s",
+    "hey car",
+    "hey man",
+    "hello car",
+    "hey bro",
+    "hey trump"
+  ],
+  "energy_threshold": 300,
+  "voice": "en-US-GuyNeural"
+}
