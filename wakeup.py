@@ -342,20 +342,21 @@ class WakeupEngine:
                         break
 
                     try:
-                        capture_time = time.monotonic()
                         audio = self.recognizer.listen(src, timeout=5, phrase_time_limit=7)
 
-                        # ── Discard stale audio chunks ────────────────────────
-                        age = time.monotonic() - capture_time
-                        if age > 2.0:
-                            print(f"[SR] Stale audio discarded ({age:.1f}s old)")
+                        # ── If SR was paused while we were recognizing, discard ──
+                        # (e.g. audio captured just before TTS started playing)
+                        if self._sr_pause.is_set() or self.state == TRAINING:
+                            print("[SR] Discarding — state changed during recognition")
                             continue
 
                         text = self.recognizer.recognize_google(audio).lower().strip()
                         if len(text.split()) < 2:
                             continue
 
+                        # ── Final guard after network round-trip ──────────────
                         if self._sr_pause.is_set() or self.state == TRAINING:
+                            print("[SR] Discarding — state changed during network call")
                             continue
 
                         print(f"[Heard] {text}")
@@ -382,3 +383,4 @@ class WakeupEngine:
                         time.sleep(1)
         except Exception as e:
             print(f"[SR] Mic open failed: {e}")
+            
