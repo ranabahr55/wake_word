@@ -13,10 +13,11 @@ except Exception:
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 import pygame
-import threading, queue, time, json, asyncio, tempfile, audioop
+import threading, queue, time, json, asyncio, tempfile
 import speech_recognition as sr   # still needed for training loop mic capture
 import edge_tts
 from speech_code import WhisperListener
+from training import TrainingModule
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -130,6 +131,7 @@ class WakeupEngine:
         # sr.Recognizer kept only for the training loop mic capture
         self._sr            = sr.Recognizer()
         self._sr.dynamic_energy_threshold = False
+        self.trainer        = TrainingModule(self, self._sr, self._sr_pause, save_cfg)
 
         self._cmd_timer: threading.Timer | None = None
         self.running        = True
@@ -197,63 +199,7 @@ class WakeupEngine:
 
     # ── Training (still uses sr.Recognizer for controlled single captures) ────
     def start_training(self):
-        if self.state != SLEEPING:
-            return
-        threading.Thread(target=self._training_loop, daemon=True).start()
-
-    def _training_loop(self):
-        STEPS = 10
-        self._sr_pause.set()
-        self._set(state=TRAINING, train_msg="Stay quiet — listening to the room…",
-                  train_prog=(0, STEPS))
-        time.sleep(0.4)
-
-        try:
-            with sr.Microphone() as src:
-                self._sr.adjust_for_ambient_noise(src, duration=2.0)
-            noise_thresh = self._sr.energy_threshold
-        except Exception as e:
-            self._set(train_msg=f"Mic error: {e}")
-            time.sleep(2)
-            self._sr_pause.clear()
-            self._go_sleep()
-            return
-
-        samples = []
-        i = 0
-        while i < STEPS:
-            self._set(train_msg=f"Say a wake phrase clearly  ({i+1} / {STEPS})",
-                      train_prog=(i, STEPS))
-            time.sleep(0.4)
-            try:
-                self._sr.energy_threshold = noise_thresh * 0.6
-                with sr.Microphone() as src:
-                    audio = self._sr.listen(src, timeout=8, phrase_time_limit=5)
-                rms = audioop.rms(audio.get_raw_data(), audio.sample_width)
-                samples.append(rms)
-                self._set(train_msg=f"Got it!  ✓  ({i+1} / {STEPS})",
-                          train_prog=(i+1, STEPS))
-                time.sleep(0.9)
-                i += 1
-            except sr.WaitTimeoutError:
-                self._set(train_msg=f"Didn't hear you — try again  ({i+1} / {STEPS})")
-                time.sleep(0.8)
-
-        if samples:
-            avg_voice  = sum(samples) / len(samples)
-            new_thresh = int(noise_thresh + (avg_voice - noise_thresh) * 0.28)
-            new_thresh = max(new_thresh, int(noise_thresh * 1.25), 300)
-            self._sr.energy_threshold     = new_thresh
-            self.cfg["energy_threshold"]  = new_thresh
-            save_cfg(self.cfg)
-            self._set(train_msg=f"Training complete!  Threshold → {new_thresh}",
-                      train_prog=(STEPS, STEPS))
-        else:
-            self._set(train_msg="Training failed — please try again.")
-
-        time.sleep(2.8)
-        self._sr_pause.clear()
-        self._go_sleep()
+        self.trainer.start()
 
     # ── Phrases ───────────────────────────────────────────────────────────────
     def handle_phrase_key(self, event):
