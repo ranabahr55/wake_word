@@ -34,6 +34,7 @@ def main():
         loading.draw()
         clock.tick(60)
 
+    engine.start_training()
     gui = CarGUI(screen)
 
     running = True
