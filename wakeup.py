@@ -43,38 +43,6 @@ LISTENING = "listening"
 SPEAKING  = "speaking"
 TRAINING  = "training"
 
-# ── Responses ─────────────────────────────────────────────────────────────────
-_RESP = [
-    (["navigate", "direction", "take me", "where is", "go to"],
-     "Sure! Setting up navigation. Where would you like to go?"),
-    (["music", "play", "song", "radio", "playlist"],
-     "Playing your music now. Enjoy the ride!"),
-    (["weather", "rain", "sunny"],
-     "It's a perfect day to drive. Pulling up the weather for you."),
-    (["call", "phone", "dial", "ring"],
-     "Connecting your call right now."),
-    (["home", "house"],
-     "Starting navigation home. About fifteen minutes away."),
-    (["gas", "fuel", "petrol"],
-     "You have enough fuel for around eighty miles. Want me to find a station?"),
-    (["temp", "heat", "cool", "climate", "ac", "air"],
-     "Setting cabin temperature to 72 degrees."),
-    (["park", "parking"],
-     "Looking for nearby parking spots."),
-    (["time", "clock", "what time"],
-     f"It's {time.strftime('%I:%M %p')}."),
-    (["volume", "louder", "quieter"],
-     "Adjusting the volume for you."),
-]
-
-def pick_response(text: str) -> str:
-    t = text.lower()
-    for kws, reply in _RESP:
-        if any(k in t for k in kws):
-            return reply
-    return "Hello! I'm your Car Assistant. How can I help you today?"
-
-
 # ── TTS Worker ────────────────────────────────────────────────────────────────
 class TTSWorker(threading.Thread):
     def __init__(self, voice: str):
@@ -198,7 +166,7 @@ class WakeupEngine:
         if self._cmd_timer:
             self._cmd_timer.cancel()
         self.await_command = False
-        resp = pick_response(text)
+        resp = "Hello! I'm your Car Assistant. How can I help you today?"
         self._set(state=SPEAKING, status="Responding…",
                   response=resp, transcript=f'You said: "{text}"')
         self.tts.say(resp, lambda: threading.Timer(2.5, self._go_sleep).start())
