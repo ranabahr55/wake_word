@@ -5,7 +5,8 @@
     "hey man",
     "hello car",
     "hey bro",
-    "hey trump"
+    "hey trump",
+    "hello"
   ],
   "energy_threshold": 300,
   "voice": "en-US-GuyNeural"
