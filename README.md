@@ -48,20 +48,7 @@ Responses are spoken using Microsoft's `en-US-GuyNeural` neural voice via `edge-
 Say **"Hello Car"** or **"Hey Car"** out loud. The orb lights up, the wave animation appears, and the assistant greets you.
 
 ### Give a command
-After it wakes, speak a command. Supported topics:
-
-| What you say | What it does |
-|---|---|
-| "Navigate to…" / "Take me to…" | Navigation |
-| "Play music" / "Radio" | Music |
-| "Weather" | Weather |
-| "Call…" / "Dial…" | Phone call |
-| "Home" / "House" | Navigate home |
-| "Gas" / "Fuel" | Find a gas station |
-| "Temperature" / "AC" / "Heat" | Climate control |
-| "Parking" | Find parking |
-| "What time is it" | Current time |
-| "Volume" / "Louder" / "Quieter" | Volume control |
+After it wakes, speak a command. The assistant will acknowledge what you said and respond with **"Hello! I'm your Car Assistant. How can I help you today?"**
 
 If no command is given within 12 seconds the assistant goes back to sleep automatically.
 
