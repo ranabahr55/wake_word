@@ -7,6 +7,6 @@
     "hey bro",
     "hey trump"
   ],
-  "energy_threshold": 300,
-  "voice": "en-US-GuyNeural"
+  "voice": "en-US-GuyNeural",
+  "energy_threshold": 300
 }
