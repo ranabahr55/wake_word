@@ -1,63 +1,51 @@
-# Hello Car — Voice Assistant Demo
+# Hello Car — Voice Assistant
 
 A wake-word voice assistant with a Siri-style animated UI built in Python using pygame. Say **"Hello Car"** (or any custom phrase) to activate it, speak a command, and it responds with a neural text-to-speech voice.
 
-Speech recognition runs **fully offline** using OpenAI Whisper (`base.en` model). Only text-to-speech requires an internet connection.
+Speech recognition uses Google's API. Text-to-speech uses Microsoft Edge TTS. Both require an internet connection.
 
 ---
 
 ## Requirements
 
 - Python 3.10+
-- A working microphone (stereo mic recommended for sound direction)
-- Internet connection (Microsoft Edge TTS for voice output only)
-- Webcam (optional — for color recognition)
+- A working microphone
+- Internet connection (for speech recognition and TTS)
 
 Install dependencies:
 
 ```bash
-pip install pygame faster-whisper pyaudio numpy edge-tts opencv-python
+pip install pygame speechrecognition edge-tts
 ```
-
-> On first run the `base.en` Whisper model (~74 MB) is downloaded automatically and cached locally. Every subsequent run is fully offline for recognition.
 
 ---
 
 ## Run
 
 ```bash
-python3 car_assistant.py
+python3 main.py
 ```
 
 Startup sequence:
-1. **Loading Whisper model…** — a few seconds on first run
-2. **Calibrating microphone…** — measures room noise floor
-3. **Say a wake phrase to activate** — ready
+1. **Calibrating microphone…** — measures room noise floor
+2. **Say a wake phrase to activate** — ready
 
 ---
 
 ## How it works
 
-### Speech recognition — Whisper (offline)
-Voice is captured via PyAudio using energy-based voice activity detection (VAD). When speech is detected the audio is transcribed locally by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base.en`, int8 quantised). No audio ever leaves the machine.
+### Speech recognition — Google (online)
+Voice is captured via `SpeechRecognition`. When speech is detected the audio is sent to Google Speech Recognition and transcribed. Energy threshold calibration on startup reduces false triggers from background noise.
 
 ### Text-to-speech — Edge TTS (online)
-Responses are spoken using Microsoft's `en-US-GuyNeural` neural voice. An internet connection is only required when the assistant speaks.
-
-### Sound direction — stereo mic
-If a stereo microphone is detected, the app compares left and right channel energy on every recording to determine which side the sound came from. The RC car in the orb rotates to face that direction and a glowing arrow appears on the ring around the orb. A `◈ STEREO DIRECTION` badge in the top-left confirms it is active.
-
-### Color recognition — webcam
-If a webcam is connected, OpenCV scans the camera feed at ~8 FPS and identifies dominant colors using HSV color masks. A live preview with a color strip appears in the bottom-right corner. Say **"what color"**, **"what do you see"**, or **"look"** after waking the car to get a spoken color report. If no camera is found the widget shows a placeholder and the voice command responds gracefully.
+Responses are spoken using Microsoft's `en-US-GuyNeural` neural voice via `edge-tts`. Audio is streamed to a temp file and played through pygame's mixer.
 
 ---
 
 ## How to use
 
 ### Wake it up
-Say **"Hello Car"** or **"Hey Car"** out loud. The orb lights up, the Siri-style wave animation appears, and the assistant greets you.
-
-If you have a stereo mic, the RC car logo will rotate in the orb to face the direction your voice came from.
+Say **"Hello Car"** or **"Hey Car"** out loud. The orb lights up, the wave animation appears, and the assistant greets you.
 
 ### Give a command
 After it wakes, speak a command. Supported topics:
@@ -74,7 +62,6 @@ After it wakes, speak a command. Supported topics:
 | "Parking" | Find parking |
 | "What time is it" | Current time |
 | "Volume" / "Louder" / "Quieter" | Volume control |
-| "What color" / "What do you see" / "Look" | Color recognition (requires webcam) |
 
 If no command is given within 12 seconds the assistant goes back to sleep automatically.
 
@@ -82,7 +69,8 @@ If no command is given within 12 seconds the assistant goes back to sleep automa
 
 | Key | Action |
 |---|---|
-| `SPACE` | Manually trigger wake (useful for testing without mic) |
+| `SPACE` | Manually trigger wake |
+| `S` | Stop speaking |
 | `ESC` | Quit |
 
 ---
@@ -94,8 +82,7 @@ Calibrates the microphone energy threshold so the assistant responds to your voi
 1. Click **⚙ Train Voice** on the home screen
 2. Stay quiet for 2 seconds — the room noise floor is measured
 3. Say a wake phrase **10 times** when prompted
-4. Each attempt is transcribed by Whisper to confirm the phrase was heard correctly — mismatches prompt a retry rather than counting silently
-5. The threshold is saved to `config.json` and applied automatically on every future run
+4. The threshold is saved to `config.json` and applied automatically on every future run
 
 > Training is fully isolated — the main recognition loop is blocked while training owns the microphone, so the assistant cannot be accidentally woken mid-session.
 
@@ -116,44 +103,23 @@ All changes save instantly to `config.json`.
 
 ## Config file
 
-Settings persist in `config.json` next to the script:
+Settings persist in `config.json` next to the scripts:
 
 ```json
 {
   "wake_phrases": ["hello car", "hey car"],
-  "energy_threshold": 0.018,
-  "voice": "en-US-GuyNeural",
-  "whisper_model": "base.en"
+  "energy_threshold": 400,
+  "voice": "en-US-GuyNeural"
 }
 ```
 
 | Key | Description |
 |---|---|
 | `wake_phrases` | List of phrases that wake the assistant |
-| `energy_threshold` | Float (0–1 scale) — mic sensitivity set by training. Lower = more sensitive |
+| `energy_threshold` | Integer — mic sensitivity set by training. Lower = more sensitive |
 | `voice` | Edge TTS voice ID |
-| `whisper_model` | Whisper model size: `tiny.en`, `base.en`, `small.en`, `medium.en` |
 
 Delete `config.json` to reset everything to defaults.
-
-### Changing the Whisper model
-
-Edit `whisper_model` in `config.json` to trade speed for accuracy:
-
-| Model | Size | Speed (CPU) | Accuracy |
-|---|---|---|---|
-| `tiny.en` | 39 MB | ~0.5 s | Good |
-| `base.en` | 74 MB | ~1 s | Better (default) |
-| `small.en` | 244 MB | ~3 s | Best for most use |
-| `medium.en` | 769 MB | ~8 s | Highest |
-
----
-
-## Voice
-
-Uses **Microsoft Edge TTS** (`en-US-GuyNeural` by default) — a natural-sounding American male neural voice. No API key required. Requires an internet connection to generate audio at response time.
-
-To use a different voice, update `"voice"` in `config.json` with any [Edge TTS voice name](https://github.com/rany2/edge-tts).
 
 ---
 
@@ -161,6 +127,8 @@ To use a different voice, update `"voice"` in `config.json` with any [Edge TTS v
 
 | File | Purpose |
 |---|---|
-| `car_assistant.py` | Main application |
+| `main.py` | Entry point — initialises pygame, runs the loading screen, and drives the main event loop |
+| `wakeup.py` | Engine — speech recognition, wake word detection, TTS, voice training, phrase management, and all app state |
+| `gui.py` | Rendering — loading screen, animated orb, Siri-style wave, RC car icon, buttons, and overlays |
 | `config.json` | Saved settings (auto-created on first run or after training) |
 | `requirements.txt` | Python dependencies |
