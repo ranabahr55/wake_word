@@ -35,10 +35,10 @@ Startup sequence:
 ## How it works
 
 ### Speech recognition — Google (online)
-Voice is captured via `SpeechRecognition`. When speech is detected the audio is sent to Google Speech Recognition and transcribed. Energy threshold calibration on startup reduces false triggers from background noise.
+Voice is captured via `SpeechRecognition` with the microphone held open continuously to avoid capture gaps between cycles. When speech is detected the audio is sent to Google Speech Recognition and transcribed. Stale audio chunks older than 2 seconds are automatically discarded to prevent delayed transcriptions. Energy threshold calibration on startup reduces false triggers from background noise, and a rolling noise-floor adjustment nudges the threshold every 10 seconds while the assistant is sleeping to adapt to changing environments like motor noise.
 
 ### Text-to-speech — Edge TTS (online)
-Responses are spoken using Microsoft's `en-US-GuyNeural` neural voice via `edge-tts`. Audio is streamed to a temp file and played through pygame's mixer.
+Responses are spoken using Microsoft's `en-US-GuyNeural` neural voice via `edge-tts`. Audio is streamed to a temp file and played through pygame's mixer. The microphone is automatically gated off while the assistant is speaking to prevent it from hearing its own voice, and re-enabled after a short settle delay once playback finishes.
 
 ---
 
@@ -115,7 +115,7 @@ Delete `config.json` to reset everything to defaults.
 | File | Purpose |
 |---|---|
 | `main.py` | Entry point — initialises pygame, runs the loading screen, and drives the main event loop |
-| `wakeup.py` | Engine — speech recognition, wake word detection, TTS, voice training, phrase management, and all app state |
+| `wakeup.py` | Engine — speech recognition, wake word detection, TTS, voice training, phrase management, rolling noise-floor adjustment, and all app state |
 | `gui.py` | Rendering — loading screen, animated orb, Siri-style wave, RC car icon, buttons, and overlays |
 | `config.json` | Saved settings (auto-created on first run or after training) |
 | `requirements.txt` | Python dependencies |
