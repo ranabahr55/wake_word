@@ -16,7 +16,7 @@ import pygame
 import threading, queue, time, json, asyncio, tempfile, audioop
 import speech_recognition as sr   # still needed for training loop mic capture
 import edge_tts
-from speech_recognition import WhisperListener
+from speech_code import WhisperListener
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
