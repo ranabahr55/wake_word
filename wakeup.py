@@ -45,11 +45,12 @@ TRAINING  = "training"
 
 # ── TTS Worker ────────────────────────────────────────────────────────────────
 class TTSWorker(threading.Thread):
-    def __init__(self, voice: str):
+    def __init__(self, voice: str, sr_pause_event: threading.Event):
         super().__init__(daemon=True)
         self.voice      = voice
         self._q         = queue.Queue()
         self._stop_flag = threading.Event()
+        self._sr_pause  = sr_pause_event   # shared with WakeupEngine
 
     def say(self, text: str, done_cb=None):
         self._q.put((text, done_cb))
@@ -75,6 +76,10 @@ class TTSWorker(threading.Thread):
                 if self._stop_flag.is_set():
                     os.unlink(fname)
                     continue
+
+                # ── Gate SR off while speaking to prevent echo ────────────────
+                self._sr_pause.set()
+
                 pygame.mixer.music.load(fname)
                 pygame.mixer.music.play()
                 while pygame.mixer.music.get_busy():
@@ -89,6 +94,10 @@ class TTSWorker(threading.Thread):
                     os.unlink(fname)
                 except Exception:
                     pass
+                # ── Re-enable SR; small delay lets mic settle after playback ──
+                time.sleep(0.3)
+                self._sr_pause.clear()
+
                 if cb and not self._stop_flag.is_set():
                     cb()
 
@@ -99,6 +108,9 @@ class TTSWorker(threading.Thread):
 
 # ── Wakeup Engine ─────────────────────────────────────────────────────────────
 class WakeupEngine:
+
+    # How often (seconds) to nudge the energy threshold while sleeping
+    _NOISE_POLL_INTERVAL = 10
 
     def __init__(self):
         self._lock          = threading.Lock()
@@ -113,18 +125,22 @@ class WakeupEngine:
         self.wake_phrases   = list(self.cfg.get("wake_phrases", DEFAULTS["wake_phrases"]))
         self.phrases_open   = False
         self.phrases_input  = ""
-        self.tts            = TTSWorker(voice=self.cfg.get("voice", "en-US-GuyNeural"))
+        self._sr_pause      = threading.Event()
+        self.tts            = TTSWorker(
+                                  voice=self.cfg.get("voice", "en-US-GuyNeural"),
+                                  sr_pause_event=self._sr_pause)
         self.tts.start()
         self.recognizer     = sr.Recognizer()
         self.recognizer.dynamic_energy_threshold = False
-        self._sr_pause      = threading.Event()
         self._cmd_timer: threading.Timer | None = None
         self.ready          = threading.Event()
         self.running        = True
         self._sr_thread     = threading.Thread(target=self._sr_loop, daemon=True)
+        self._noise_thread  = threading.Thread(target=self._noise_loop, daemon=True)
 
     def start(self):
         self._sr_thread.start()
+        self._noise_thread.start()
 
     # ── State helpers ─────────────────────────────────────────────────────────
     def _set(self, state=None, status=None, response=None, transcript=None,
@@ -145,6 +161,30 @@ class WakeupEngine:
                   status="Say a wake phrase to activate",
                   response="", transcript="", train_msg="")
 
+    # ── Rolling noise-floor adjustment ────────────────────────────────────────
+    def _noise_loop(self):
+        """Periodically re-sample ambient RMS while sleeping and nudge threshold."""
+        self.ready.wait()
+        while self.running:
+            time.sleep(self._NOISE_POLL_INTERVAL)
+            if self.state != SLEEPING or self._sr_pause.is_set():
+                continue
+            try:
+                self._sr_pause.set()
+                with sr.Microphone() as src:
+                    self.recognizer.adjust_for_ambient_noise(src, duration=0.8)
+                ambient = self.recognizer.energy_threshold
+                self._sr_pause.clear()
+
+                current = self.recognizer.energy_threshold
+                nudged  = int(current * 0.9 + ambient * 1.4 * 0.1)
+                nudged  = max(nudged, 300)
+                self.recognizer.energy_threshold = nudged
+                print(f"[Noise] threshold nudged → {nudged}")
+            except Exception as e:
+                self._sr_pause.clear()
+                print(f"[Noise] {e}")
+
     # ── Wake / command ────────────────────────────────────────────────────────
     def _trigger_wake(self):
         if self.state == TRAINING:
@@ -160,6 +200,7 @@ class WakeupEngine:
     def stop_speaking(self):
         """Interrupt TTS and return to sleep immediately."""
         self.tts.stop_speaking()
+        self._sr_pause.clear()   # make sure SR is re-enabled after forced stop
         self._go_sleep()
 
     def _handle_command(self, text: str):
@@ -291,42 +332,53 @@ class WakeupEngine:
 
         self.ready.set()
 
-        while self.running:
-            while self._sr_pause.is_set() and self.running:
-                time.sleep(0.15)
-            if not self.running:
-                break
+        # ── Keep mic open continuously to avoid capture gaps ──────────────────
+        try:
+            with sr.Microphone() as src:
+                while self.running:
+                    while self._sr_pause.is_set() and self.running:
+                        time.sleep(0.15)
+                    if not self.running:
+                        break
 
-            try:
-                with sr.Microphone() as src:
-                    audio = self.recognizer.listen(src, timeout=5, phrase_time_limit=7)
+                    try:
+                        capture_time = time.monotonic()
+                        audio = self.recognizer.listen(src, timeout=5, phrase_time_limit=7)
 
-                text = self.recognizer.recognize_google(audio).lower().strip()
-                if len(text.split()) < 2:
-                    continue
+                        # ── Discard stale audio chunks ────────────────────────
+                        age = time.monotonic() - capture_time
+                        if age > 2.0:
+                            print(f"[SR] Stale audio discarded ({age:.1f}s old)")
+                            continue
 
-                if self._sr_pause.is_set() or self.state == TRAINING:
-                    continue
+                        text = self.recognizer.recognize_google(audio).lower().strip()
+                        if len(text.split()) < 2:
+                            continue
 
-                print(f"[Heard] {text}")
+                        if self._sr_pause.is_set() or self.state == TRAINING:
+                            continue
 
-                if not self.await_command:
-                    with self._lock:
-                        self.transcript = f'"{text}"'
-                    if any(p in text for p in self.wake_phrases):
-                        self._trigger_wake()
-                    else:
-                        threading.Timer(2, lambda: self._set(transcript="")).start()
-                else:
-                    self._handle_command(text)
+                        print(f"[Heard] {text}")
 
-            except sr.WaitTimeoutError:
-                pass
-            except sr.UnknownValueError:
-                pass
-            except sr.RequestError as e:
-                print(f"[SR] API error: {e} — retrying in 3 s")
-                time.sleep(3)
-            except Exception as e:
-                print(f"[SR] Unexpected: {e}")
-                time.sleep(1)
+                        if not self.await_command:
+                            with self._lock:
+                                self.transcript = f'"{text}"'
+                            if any(p in text for p in self.wake_phrases):
+                                self._trigger_wake()
+                            else:
+                                threading.Timer(2, lambda: self._set(transcript="")).start()
+                        else:
+                            self._handle_command(text)
+
+                    except sr.WaitTimeoutError:
+                        pass
+                    except sr.UnknownValueError:
+                        pass
+                    except sr.RequestError as e:
+                        print(f"[SR] API error: {e} — retrying in 3 s")
+                        time.sleep(3)
+                    except Exception as e:
+                        print(f"[SR] Unexpected: {e}")
+                        time.sleep(1)
+        except Exception as e:
+            print(f"[SR] Mic open failed: {e}")
