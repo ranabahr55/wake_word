@@ -35,7 +35,7 @@ Startup sequence:
 ## How it works
 
 ### Speech recognition — Google (online)
-Voice is captured via `SpeechRecognition` with the microphone held open continuously to avoid capture gaps between cycles. When speech is detected the audio is sent to Google Speech Recognition and transcribed. Stale audio chunks older than 2 seconds are automatically discarded to prevent delayed transcriptions. Energy threshold calibration on startup reduces false triggers from background noise, and a rolling noise-floor adjustment nudges the threshold every 10 seconds while the assistant is sleeping to adapt to changing environments like motor noise.
+Voice is captured via `SpeechRecognition` with the microphone held open continuously to avoid capture gaps between cycles. When speech is detected the audio is sent to Google Speech Recognition and transcribed. Any audio captured during TTS playback is automatically discarded to prevent the assistant hearing its own voice. Energy threshold calibration on startup reduces false triggers from background noise, and a rolling noise-floor adjustment nudges the threshold every 10 seconds while the assistant is sleeping to adapt to changing environments like motor noise.
 
 ### Text-to-speech — Edge TTS (online)
 Responses are spoken using Microsoft's `en-US-GuyNeural` neural voice via `edge-tts`. Audio is streamed to a temp file and played through pygame's mixer. The microphone is automatically gated off while the assistant is speaking to prevent it from hearing its own voice, and re-enabled after a short settle delay once playback finishes.
