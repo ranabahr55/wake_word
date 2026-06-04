@@ -14,11 +14,9 @@ os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 import pygame
 import threading, queue, time, json, asyncio, tempfile, audioop
-import numpy as np
-import sounddevice as sd
-from faster_whisper import WhisperModel
 import speech_recognition as sr   # still needed for training loop mic capture
 import edge_tts
+from whisper_listener import WhisperListener
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,16 +42,6 @@ SLEEPING  = "sleeping"
 LISTENING = "listening"
 SPEAKING  = "speaking"
 TRAINING  = "training"
-
-# ── Whisper constants ─────────────────────────────────────────────────────────
-_SAMPLE_RATE         = 16_000
-_CHANNELS            = 1
-_CHUNK_SECS          = 0.03     # 30 ms blocks
-_PHRASE_MAX          = 7.0      # seconds — discard runaway phrases
-_SILENCE_SECS        = 0.9      # silence window that ends a phrase
-_ENERGY_FLOOR        = 0.002    # RMS below this counts as silence
-_WHISPER_MODEL_SIZE  = "base"
-_MIN_WORDS           = 2
 
 # ── TTS Worker ────────────────────────────────────────────────────────────────
 class TTSWorker(threading.Thread):
@@ -139,21 +127,23 @@ class WakeupEngine:
                                   sr_pause_event=self._sr_pause)
         self.tts.start()
 
-        print(f"[SR] Loading faster-whisper '{_WHISPER_MODEL_SIZE}' on CPU…")
-        self._whisper = WhisperModel(_WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-        print("[SR] Model ready.")
-
         # sr.Recognizer kept only for the training loop mic capture
         self._sr            = sr.Recognizer()
         self._sr.dynamic_energy_threshold = False
 
         self._cmd_timer: threading.Timer | None = None
-        self.ready          = threading.Event()
         self.running        = True
-        self._sr_thread     = threading.Thread(target=self._sr_loop, daemon=True)
+        self._listener      = WhisperListener(
+                                  wake_phrases=self.wake_phrases,
+                                  on_wake=lambda _: self._trigger_wake(),
+                                  on_command=self._handle_command,
+                                  on_partial=self._on_partial,
+                                  pause_event=self._sr_pause,
+                              )
+        self.ready          = self._listener.ready
 
     def start(self):
-        self._sr_thread.start()
+        self._listener.start()
 
     # ── State helpers ─────────────────────────────────────────────────────────
     def _set(self, state=None, status=None, response=None, transcript=None,
@@ -167,7 +157,7 @@ class WakeupEngine:
             if train_prog is not None: self.train_prog    = train_prog
 
     def _go_sleep(self):
-        self.await_command = False
+        self._listener.await_command = False
         if self._cmd_timer:
             self._cmd_timer.cancel()
         self._set(state=SLEEPING,
@@ -178,7 +168,7 @@ class WakeupEngine:
     def _trigger_wake(self):
         if self.state == TRAINING:
             return
-        self.await_command = True
+        self._listener.await_command = True
         self._set(state=LISTENING, status="Hello! What can I do for you?",
                   response="", transcript="")
         self.tts.say("Hello! What can I do for you?",
@@ -194,7 +184,7 @@ class WakeupEngine:
     def _handle_command(self, text: str):
         if self._cmd_timer:
             self._cmd_timer.cancel()
-        self.await_command = False
+        self._listener.await_command = False
         resp = "Hello! I'm your Car Assistant. How can I help you today?"
         self._set(state=SPEAKING, status="Responding…",
                   response=resp, transcript=f'You said: "{text}"')
@@ -300,94 +290,8 @@ class WakeupEngine:
             self.phrases_open  = False
             self.phrases_input = ""
 
-    # ── Whisper SR loop ───────────────────────────────────────────────────────
-    def _transcribe(self, audio: np.ndarray) -> str:
-        segments, _ = self._whisper.transcribe(
-            audio,
-            language="en",
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
-        )
-        return " ".join(s.text for s in segments).lower().strip()
-
-    def _sr_loop(self):
-        chunk_size            = int(_SAMPLE_RATE * _CHUNK_SECS)
-        silence_chunks_needed = int(_SILENCE_SECS / _CHUNK_SECS)
-        max_chunks            = int(_PHRASE_MAX / _CHUNK_SECS)
-
-        print("[SR] Opening microphone…")
-        try:
-            with sd.InputStream(
-                samplerate=_SAMPLE_RATE,
-                channels=_CHANNELS,
-                dtype="float32",
-                blocksize=chunk_size,
-            ) as mic:
-                print("[SR] Listening.")
-                self.ready.set()
-
-                phrase_buf: list[np.ndarray] = []
-                silence_count = 0
-                in_phrase     = False
-
-                while self.running:
-                    # ── Idle while paused (TTS / training) ───────────────
-                    if self._sr_pause.is_set() or self.state == TRAINING:
-                        mic.read(chunk_size)   # drain so stale audio doesn't bleed
-                        phrase_buf.clear()
-                        in_phrase     = False
-                        silence_count = 0
-                        time.sleep(0.05)
-                        continue
-
-                    chunk, _ = mic.read(chunk_size)
-                    chunk    = chunk[:, 0]     # mono
-                    rms      = float(np.sqrt(np.mean(chunk ** 2)))
-
-                    if rms > _ENERGY_FLOOR:
-                        phrase_buf.append(chunk)
-                        silence_count = 0
-                        in_phrase     = True
-                    elif in_phrase:
-                        phrase_buf.append(chunk)
-                        silence_count += 1
-
-                        if (silence_count >= silence_chunks_needed
-                                or len(phrase_buf) >= max_chunks):
-                            audio     = np.concatenate(phrase_buf)
-                            phrase_buf.clear()
-                            in_phrase     = False
-                            silence_count = 0
-
-                            if self._sr_pause.is_set() or self.state == TRAINING:
-                                print("[SR] Discarding — state changed before transcription")
-                                continue
-
-                            try:
-                                text = self._transcribe(audio)
-                            except Exception as e:
-                                print(f"[SR] Transcription error: {e}")
-                                continue
-
-                            if not text or len(text.split()) < _MIN_WORDS:
-                                continue
-
-                            if self._sr_pause.is_set() or self.state == TRAINING:
-                                print("[SR] Discarding — state changed after transcription")
-                                continue
-
-                            print(f"[Heard] {text}")
-
-                            if not self.await_command:
-                                with self._lock:
-                                    self.transcript = f'"{text}"'
-                                if any(p in text for p in self.wake_phrases):
-                                    self._trigger_wake()
-                                else:
-                                    threading.Timer(2, lambda: self._set(transcript="")).start()
-                            else:
-                                self._handle_command(text)
-
-        except Exception as e:
-            print(f"[SR] Mic open failed: {e}")
+    # ── Partial (non-wake) transcript display ─────────────────────────────────
+    def _on_partial(self, text: str):
+        with self._lock:
+            self.transcript = f'"{text}"'
+        threading.Timer(2, lambda: self._set(transcript="")).start()
