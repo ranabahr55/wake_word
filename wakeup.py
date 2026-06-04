@@ -14,16 +14,18 @@ os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 import pygame
 import threading, queue, time, json, asyncio, tempfile, audioop
-import speech_recognition as sr
+import numpy as np
+import sounddevice as sd
+from faster_whisper import WhisperModel
+import speech_recognition as sr   # still needed for training loop mic capture
 import edge_tts
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(_DIR, "config.json")
 DEFAULTS = {
-    "wake_phrases":     ["hello car", "hey car"],
-    "energy_threshold": None,
-    "voice":            "en-US-GuyNeural",
+    "wake_phrases": ["hello car", "hey car"],
+    "voice":        "en-US-GuyNeural",
 }
 
 def load_cfg():
@@ -43,6 +45,16 @@ LISTENING = "listening"
 SPEAKING  = "speaking"
 TRAINING  = "training"
 
+# ── Whisper constants ─────────────────────────────────────────────────────────
+_SAMPLE_RATE         = 16_000
+_CHANNELS            = 1
+_CHUNK_SECS          = 0.03     # 30 ms blocks
+_PHRASE_MAX          = 7.0      # seconds — discard runaway phrases
+_SILENCE_SECS        = 0.9      # silence window that ends a phrase
+_ENERGY_FLOOR        = 0.002    # RMS below this counts as silence
+_WHISPER_MODEL_SIZE  = "base"
+_MIN_WORDS           = 2
+
 # ── TTS Worker ────────────────────────────────────────────────────────────────
 class TTSWorker(threading.Thread):
     def __init__(self, voice: str, sr_pause_event: threading.Event):
@@ -50,13 +62,12 @@ class TTSWorker(threading.Thread):
         self.voice      = voice
         self._q         = queue.Queue()
         self._stop_flag = threading.Event()
-        self._sr_pause  = sr_pause_event   # shared with WakeupEngine
+        self._sr_pause  = sr_pause_event
 
     def say(self, text: str, done_cb=None):
         self._q.put((text, done_cb))
 
     def stop_speaking(self):
-        """Interrupt current speech and drain any queued items."""
         self._stop_flag.set()
         pygame.mixer.music.stop()
         while not self._q.empty():
@@ -77,7 +88,6 @@ class TTSWorker(threading.Thread):
                     os.unlink(fname)
                     continue
 
-                # ── Gate SR off while speaking to prevent echo ────────────────
                 self._sr_pause.set()
 
                 pygame.mixer.music.load(fname)
@@ -94,7 +104,6 @@ class TTSWorker(threading.Thread):
                     os.unlink(fname)
                 except Exception:
                     pass
-                # ── Re-enable SR; small delay lets mic settle after playback ──
                 time.sleep(0.3)
                 self._sr_pause.clear()
 
@@ -109,7 +118,6 @@ class TTSWorker(threading.Thread):
 # ── Wakeup Engine ─────────────────────────────────────────────────────────────
 class WakeupEngine:
 
-    # How often (seconds) to nudge the energy threshold while sleeping
     _NOISE_POLL_INTERVAL = 10
 
     def __init__(self):
@@ -130,17 +138,22 @@ class WakeupEngine:
                                   voice=self.cfg.get("voice", "en-US-GuyNeural"),
                                   sr_pause_event=self._sr_pause)
         self.tts.start()
-        self.recognizer     = sr.Recognizer()
-        self.recognizer.dynamic_energy_threshold = False
+
+        print(f"[SR] Loading faster-whisper '{_WHISPER_MODEL_SIZE}' on CPU…")
+        self._whisper = WhisperModel(_WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+        print("[SR] Model ready.")
+
+        # sr.Recognizer kept only for the training loop mic capture
+        self._sr            = sr.Recognizer()
+        self._sr.dynamic_energy_threshold = False
+
         self._cmd_timer: threading.Timer | None = None
         self.ready          = threading.Event()
         self.running        = True
         self._sr_thread     = threading.Thread(target=self._sr_loop, daemon=True)
-        self._noise_thread  = threading.Thread(target=self._noise_loop, daemon=True)
 
     def start(self):
         self._sr_thread.start()
-        self._noise_thread.start()
 
     # ── State helpers ─────────────────────────────────────────────────────────
     def _set(self, state=None, status=None, response=None, transcript=None,
@@ -161,30 +174,6 @@ class WakeupEngine:
                   status="Say a wake phrase to activate",
                   response="", transcript="", train_msg="")
 
-    # ── Rolling noise-floor adjustment ────────────────────────────────────────
-    def _noise_loop(self):
-        """Periodically re-sample ambient RMS while sleeping and nudge threshold."""
-        self.ready.wait()
-        while self.running:
-            time.sleep(self._NOISE_POLL_INTERVAL)
-            if self.state != SLEEPING or self._sr_pause.is_set():
-                continue
-            try:
-                self._sr_pause.set()
-                with sr.Microphone() as src:
-                    self.recognizer.adjust_for_ambient_noise(src, duration=0.8)
-                ambient = self.recognizer.energy_threshold
-                self._sr_pause.clear()
-
-                current = self.recognizer.energy_threshold
-                nudged  = int(current * 0.9 + ambient * 1.4 * 0.1)
-                nudged  = max(nudged, 300)
-                self.recognizer.energy_threshold = nudged
-                print(f"[Noise] threshold nudged → {nudged}")
-            except Exception as e:
-                self._sr_pause.clear()
-                print(f"[Noise] {e}")
-
     # ── Wake / command ────────────────────────────────────────────────────────
     def _trigger_wake(self):
         if self.state == TRAINING:
@@ -198,9 +187,8 @@ class WakeupEngine:
         self._cmd_timer.start()
 
     def stop_speaking(self):
-        """Interrupt TTS and return to sleep immediately."""
         self.tts.stop_speaking()
-        self._sr_pause.clear()   # make sure SR is re-enabled after forced stop
+        self._sr_pause.clear()
         self._go_sleep()
 
     def _handle_command(self, text: str):
@@ -217,7 +205,7 @@ class WakeupEngine:
             "I didn't catch that. Say a wake phrase whenever you need me.",
             self._go_sleep)
 
-    # ── Training ──────────────────────────────────────────────────────────────
+    # ── Training (still uses sr.Recognizer for controlled single captures) ────
     def start_training(self):
         if self.state != SLEEPING:
             return
@@ -232,8 +220,8 @@ class WakeupEngine:
 
         try:
             with sr.Microphone() as src:
-                self.recognizer.adjust_for_ambient_noise(src, duration=2.0)
-            noise_thresh = self.recognizer.energy_threshold
+                self._sr.adjust_for_ambient_noise(src, duration=2.0)
+            noise_thresh = self._sr.energy_threshold
         except Exception as e:
             self._set(train_msg=f"Mic error: {e}")
             time.sleep(2)
@@ -248,9 +236,9 @@ class WakeupEngine:
                       train_prog=(i, STEPS))
             time.sleep(0.4)
             try:
-                self.recognizer.energy_threshold = noise_thresh * 0.6
+                self._sr.energy_threshold = noise_thresh * 0.6
                 with sr.Microphone() as src:
-                    audio = self.recognizer.listen(src, timeout=8, phrase_time_limit=5)
+                    audio = self._sr.listen(src, timeout=8, phrase_time_limit=5)
                 rms = audioop.rms(audio.get_raw_data(), audio.sample_width)
                 samples.append(rms)
                 self._set(train_msg=f"Got it!  ✓  ({i+1} / {STEPS})",
@@ -262,11 +250,11 @@ class WakeupEngine:
                 time.sleep(0.8)
 
         if samples:
-            avg_voice = sum(samples) / len(samples)
+            avg_voice  = sum(samples) / len(samples)
             new_thresh = int(noise_thresh + (avg_voice - noise_thresh) * 0.28)
             new_thresh = max(new_thresh, int(noise_thresh * 1.25), 300)
-            self.recognizer.energy_threshold = new_thresh
-            self.cfg["energy_threshold"] = new_thresh
+            self._sr.energy_threshold     = new_thresh
+            self.cfg["energy_threshold"]  = new_thresh
             save_cfg(self.cfg)
             self._set(train_msg=f"Training complete!  Threshold → {new_thresh}",
                       train_prog=(STEPS, STEPS))
@@ -312,75 +300,94 @@ class WakeupEngine:
             self.phrases_open  = False
             self.phrases_input = ""
 
-    # ── SR loop ───────────────────────────────────────────────────────────────
+    # ── Whisper SR loop ───────────────────────────────────────────────────────
+    def _transcribe(self, audio: np.ndarray) -> str:
+        segments, _ = self._whisper.transcribe(
+            audio,
+            language="en",
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 300},
+        )
+        return " ".join(s.text for s in segments).lower().strip()
+
     def _sr_loop(self):
-        print("[SR] Calibrating microphone…")
-        try:
-            with sr.Microphone() as src:
-                self.recognizer.adjust_for_ambient_noise(src, duration=1.5)
-            saved = self.cfg.get("energy_threshold")
-            if saved:
-                self.recognizer.energy_threshold = saved
-            else:
-                self.recognizer.energy_threshold = max(
-                    self.recognizer.energy_threshold * 1.3, 400)
-            print(f"[SR] Ready  (threshold={self.recognizer.energy_threshold:.0f})")
-        except Exception as e:
-            print(f"[SR] Mic init failed: {e}")
-            self.ready.set()
-            return
+        chunk_size            = int(_SAMPLE_RATE * _CHUNK_SECS)
+        silence_chunks_needed = int(_SILENCE_SECS / _CHUNK_SECS)
+        max_chunks            = int(_PHRASE_MAX / _CHUNK_SECS)
 
-        self.ready.set()
-
-        # ── Keep mic open continuously to avoid capture gaps ──────────────────
+        print("[SR] Opening microphone…")
         try:
-            with sr.Microphone() as src:
+            with sd.InputStream(
+                samplerate=_SAMPLE_RATE,
+                channels=_CHANNELS,
+                dtype="float32",
+                blocksize=chunk_size,
+            ) as mic:
+                print("[SR] Listening.")
+                self.ready.set()
+
+                phrase_buf: list[np.ndarray] = []
+                silence_count = 0
+                in_phrase     = False
+
                 while self.running:
-                    while self._sr_pause.is_set() and self.running:
-                        time.sleep(0.15)
-                    if not self.running:
-                        break
+                    # ── Idle while paused (TTS / training) ───────────────
+                    if self._sr_pause.is_set() or self.state == TRAINING:
+                        mic.read(chunk_size)   # drain so stale audio doesn't bleed
+                        phrase_buf.clear()
+                        in_phrase     = False
+                        silence_count = 0
+                        time.sleep(0.05)
+                        continue
 
-                    try:
-                        audio = self.recognizer.listen(src, timeout=5, phrase_time_limit=7)
+                    chunk, _ = mic.read(chunk_size)
+                    chunk    = chunk[:, 0]     # mono
+                    rms      = float(np.sqrt(np.mean(chunk ** 2)))
 
-                        # ── If SR was paused while we were recognizing, discard ──
-                        # (e.g. audio captured just before TTS started playing)
-                        if self._sr_pause.is_set() or self.state == TRAINING:
-                            print("[SR] Discarding — state changed during recognition")
-                            continue
+                    if rms > _ENERGY_FLOOR:
+                        phrase_buf.append(chunk)
+                        silence_count = 0
+                        in_phrase     = True
+                    elif in_phrase:
+                        phrase_buf.append(chunk)
+                        silence_count += 1
 
-                        text = self.recognizer.recognize_google(audio).lower().strip()
-                        if len(text.split()) < 2:
-                            continue
+                        if (silence_count >= silence_chunks_needed
+                                or len(phrase_buf) >= max_chunks):
+                            audio     = np.concatenate(phrase_buf)
+                            phrase_buf.clear()
+                            in_phrase     = False
+                            silence_count = 0
 
-                        # ── Final guard after network round-trip ──────────────
-                        if self._sr_pause.is_set() or self.state == TRAINING:
-                            print("[SR] Discarding — state changed during network call")
-                            continue
+                            if self._sr_pause.is_set() or self.state == TRAINING:
+                                print("[SR] Discarding — state changed before transcription")
+                                continue
 
-                        print(f"[Heard] {text}")
+                            try:
+                                text = self._transcribe(audio)
+                            except Exception as e:
+                                print(f"[SR] Transcription error: {e}")
+                                continue
 
-                        if not self.await_command:
-                            with self._lock:
-                                self.transcript = f'"{text}"'
-                            if any(p in text for p in self.wake_phrases):
-                                self._trigger_wake()
+                            if not text or len(text.split()) < _MIN_WORDS:
+                                continue
+
+                            if self._sr_pause.is_set() or self.state == TRAINING:
+                                print("[SR] Discarding — state changed after transcription")
+                                continue
+
+                            print(f"[Heard] {text}")
+
+                            if not self.await_command:
+                                with self._lock:
+                                    self.transcript = f'"{text}"'
+                                if any(p in text for p in self.wake_phrases):
+                                    self._trigger_wake()
+                                else:
+                                    threading.Timer(2, lambda: self._set(transcript="")).start()
                             else:
-                                threading.Timer(2, lambda: self._set(transcript="")).start()
-                        else:
-                            self._handle_command(text)
+                                self._handle_command(text)
 
-                    except sr.WaitTimeoutError:
-                        pass
-                    except sr.UnknownValueError:
-                        pass
-                    except sr.RequestError as e:
-                        print(f"[SR] API error: {e} — retrying in 3 s")
-                        time.sleep(3)
-                    except Exception as e:
-                        print(f"[SR] Unexpected: {e}")
-                        time.sleep(1)
         except Exception as e:
             print(f"[SR] Mic open failed: {e}")
-            
