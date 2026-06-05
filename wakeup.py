@@ -18,7 +18,6 @@ import speech_recognition as sr   # still needed for training loop mic capture
 import edge_tts
 from speech_code import WhisperListener
 from training import TrainingModule
-from zenoh_audio import sender, receiver
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -110,7 +109,7 @@ class WakeupEngine:
 
     _NOISE_POLL_INTERVAL = 10
 
-    def __init__(self):
+    def __init__(self, mic_queue=None):
         self._lock          = threading.Lock()
         self.cfg            = load_cfg()
         self.state          = SLEEPING
@@ -142,6 +141,7 @@ class WakeupEngine:
                                   on_command=self._handle_command,
                                   on_partial=self._on_partial,
                                   pause_event=self._sr_pause,
+                                  mic_queue=mic_queue
                               )
         self.ready          = self._listener.ready
 

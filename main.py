@@ -10,7 +10,10 @@ import pygame
 
 from wakeup import WakeupEngine, SLEEPING, SPEAKING
 from gui import CarGUI, LoadingScreen, W, H
-
+from mic_capture import MicCapture
+from zenoh_audio import ZenohSender, ZenohReceiver
+from wakeup import WakeupEngine, SLEEPING, SPEAKING
+from gui import CarGUI, LoadingScreen, W, H
 
 def main():
     pygame.init()
@@ -19,8 +22,15 @@ def main():
     screen = pygame.display.set_mode((W, H))
     pygame.display.set_caption("Hello Car — Voice Assistant")
     clock = pygame.time.Clock()
+    
+    mic = MicCapture()
+    sr_queue = mic.register()
+    zen_queue = mic.register()
+    mic.start()
+    ZenohSender(zen_queue).start()
+    ZenohReceiver().start()
 
-    engine = WakeupEngine()
+    engine = WakeupEngine(mic_queue=sr_queue)
     loading = LoadingScreen(screen)
 
     # Start SR calibration in background; show loading screen until ready
@@ -29,6 +39,7 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 engine.running = False
+                mic.stop()
                 pygame.quit()
                 sys.exit(0)
         loading.draw()
@@ -69,6 +80,7 @@ def main():
         clock.tick(60)
 
     engine.running = False
+    mic.stop()
     pygame.quit()
     sys.exit(0)
 

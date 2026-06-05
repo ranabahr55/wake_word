@@ -1,85 +1,83 @@
 #!/usr/bin/env python3
-"""zenoh_audio.py — Stream audio between devices using Zenoh."""
+"""zenoh_audio.py — Stream audio to another device using Zenoh."""
 
 import zenoh
-import pyaudio
-import numpy as np
 import threading
 import time
+import pyaudio
+import queue
 
-# ── Config ────────────────────────────────────────────────────────────────────
-TOPIC           = "uav/audio/stream"
-SAMPLE_RATE     = 44100
-CHANNELS        = 2
-CHUNK           = 1024
-FORMAT          = pyaudio.paInt16
+TOPIC = "uav/audio/stream"
 
 # ── Sender ────────────────────────────────────────────────────────────────────
-def sender():
-    """Capture mic audio and publish over Zenoh."""
-    pa  = pyaudio.PyAudio()
-    cfg = zenoh.Config()
-    z   = zenoh.open(cfg)
-    pub = z.declare_publisher(TOPIC)
+class ZenohSender:
+    """Reads from a mic queue and publishes over Zenoh."""
 
-    stream = pa.open(
-        format=FORMAT,
-        channels=CHANNELS,
-        rate=SAMPLE_RATE,
-        input=True,
-        input_device_index=0,
-        frames_per_buffer=CHUNK,
-    )
+    def __init__(self, mic_queue: queue.Queue):
+        self._q      = mic_queue
+        self._thread = threading.Thread(target=self._loop, daemon=True)
 
-    print(f"[Sender] Streaming audio on '{TOPIC}'…")
-    try:
-        while True:
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            pub.put(data)
-    except KeyboardInterrupt:
-        print("[Sender] Stopped.")
-    finally:
-        stream.stop_stream()
-        stream.close()
-        pa.terminate()
-        z.close()
+    def start(self):
+        self._thread.start()
+
+    def _loop(self):
+        cfg = zenoh.Config()
+        z   = zenoh.open(cfg)
+        pub = z.declare_publisher(TOPIC)
+        print(f"[Zenoh] Streaming on '{TOPIC}'…")
+        try:
+            while True:
+                try:
+                    data = self._q.get(timeout=1)
+                    pub.put(data)
+                except queue.Empty:
+                    continue
+        except Exception as e:
+            print(f"[Zenoh] Error: {e}")
+        finally:
+            z.close()
 
 
 # ── Receiver ──────────────────────────────────────────────────────────────────
-def receiver():
-    """Subscribe to Zenoh audio topic and play it."""
-    pa      = pyaudio.PyAudio()
-    cfg     = zenoh.Config()
-    z       = zenoh.open(cfg)
+class ZenohReceiver:
+    """Subscribes to Zenoh audio topic and plays it back."""
 
-    stream  = pa.open(
-        format=FORMAT,
-        channels=CHANNELS,
-        rate=SAMPLE_RATE,
-        output=True,
-        frames_per_buffer=CHUNK,
-    )
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
 
-    def on_sample(sample):
-        stream.write(bytes(sample.payload))
+    def _loop(self):
+        pa     = pyaudio.PyAudio()
+        stream = pa.open(
+            format=pyaudio.paInt16,
+            channels=2,
+            rate=44100,
+            output=True,
+            frames_per_buffer=1024,
+        )
 
-    print(f"[Receiver] Listening on '{TOPIC}'…")
-    sub = z.declare_subscriber(TOPIC, on_sample)
+        cfg = zenoh.Config()
+        z   = zenoh.open(cfg)
 
-    try:
-        while True:
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        print("[Receiver] Stopped.")
-    finally:
-        sub.undeclare()
-        stream.stop_stream()
-        stream.close()
-        pa.terminate()
-        z.close()
+        def on_sample(sample):
+            stream.write(bytes(sample.payload))
+
+        print(f"[Zenoh] Receiving on '{TOPIC}'…")
+        sub = z.declare_subscriber(TOPIC, on_sample)
+
+        try:
+            while True:
+                time.sleep(0.1)
+        except Exception as e:
+            print(f"[Zenoh] Receiver error: {e}")
+        finally:
+            sub.undeclare()
+            stream.stop_stream()
+            stream.close()
+            pa.terminate()
+            z.close()
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Standalone entry point ────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2 or sys.argv[1] not in ("send", "recv"):
@@ -87,6 +85,22 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if sys.argv[1] == "send":
-        sender()
+        from mic_capture import MicCapture
+        mic = MicCapture()
+        q   = mic.register()
+        mic.start()
+        sender = ZenohSender(q)
+        sender.start()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            mic.stop()
     else:
-        receiver()
+        recv = ZenohReceiver()
+        recv.start()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
