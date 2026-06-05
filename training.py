@@ -46,7 +46,7 @@ class TrainingModule:
                     )
                     time.sleep(0.4)
                     try:
-                        audio = self._sr.listen(src, timeout=8, phrase_time_limit=5)
+                        audio = self._sr.listen(src, timeout=3, phrase_time_limit=5)
                         rms = np.sqrt(np.mean(np.square(np.frombuffer(audio.get_raw_data(), dtype=np.int16))))
                         samples.append(rms)
                         self.engine._set(
