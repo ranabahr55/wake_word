@@ -3,7 +3,7 @@
 
 import threading
 import time
-import audioop
+import numpy as np
 
 import speech_recognition as sr
 
@@ -47,7 +47,7 @@ class TrainingModule:
                     time.sleep(0.4)
                     try:
                         audio = self._sr.listen(src, timeout=8, phrase_time_limit=5)
-                        rms = audioop.rms(audio.get_raw_data(), audio.sample_width)
+                        rms = np.sqrt(np.mean(np.square(np.frombuffer(audio.get_raw_data(), dtype=np.int16))))
                         samples.append(rms)
                         self.engine._set(
                             train_msg=f"Got it!  ✓  ({i+1} / {STEPS})",
