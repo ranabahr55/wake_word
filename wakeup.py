@@ -18,6 +18,7 @@ import speech_recognition as sr   # still needed for training loop mic capture
 import edge_tts
 from speech_code import WhisperListener
 from training import TrainingModule
+from zenoh_audio import sender, receiver
 
 # ── Config ────────────────────────────────────────────────────────────────────
 _DIR = os.path.dirname(os.path.abspath(__file__))

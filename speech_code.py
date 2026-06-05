@@ -3,10 +3,12 @@
 
 import threading
 import time
+import io
+import wave
+import queue
 from difflib import SequenceMatcher
 import speech_recognition as sr
 
-# ── Fuzzy matching ────────────────────────────────────────────────────────────
 _FUZZY_THRESHOLD = 0.7
 
 def _fuzzy_match(text: str, phrases: list[str]) -> bool:
@@ -37,6 +39,7 @@ class WhisperListener:
         pause_event: threading.Event | None = None,
         energy_threshold: int | None = None,
         min_words: int = 2,
+        mic_queue: queue.Queue | None = None,
     ):
         self.wake_phrases     = wake_phrases
         self.on_wake          = on_wake
@@ -45,6 +48,7 @@ class WhisperListener:
         self._pause           = pause_event or threading.Event()
         self._saved_threshold = energy_threshold
         self._min_words       = min_words
+        self._mic_queue       = mic_queue
         self.await_command    = False
 
         self._recognizer = sr.Recognizer()
@@ -63,11 +67,6 @@ class WhisperListener:
     def stop(self):
         self._running = False
 
-    def adjust_for_ambient_noise(self, duration: float = 0.8) -> float:
-        with sr.Microphone() as src:
-            self._recognizer.adjust_for_ambient_noise(src, duration=duration)
-        return self._recognizer.energy_threshold
-
     @property
     def energy_threshold(self) -> float:
         return self._recognizer.energy_threshold
@@ -76,25 +75,77 @@ class WhisperListener:
     def energy_threshold(self, value: float):
         self._recognizer.energy_threshold = value
 
-    # ── Calibration + loop ────────────────────────────────────────────────────
-
-    def _calibrate(self, src) -> bool:
-        print("[SR] Calibrating microphone…")
-        try:
-            self._recognizer.adjust_for_ambient_noise(src, duration=1.5)
-            if self._saved_threshold:
-                self._recognizer.energy_threshold = self._saved_threshold
-            else:
-                self._recognizer.energy_threshold = max(
-                    self._recognizer.energy_threshold * 1.3, 400
-                )
-            print(f"[SR] Ready  (threshold={self._recognizer.energy_threshold:.0f})")
-            return True
-        except Exception as e:
-            print(f"[SR] Mic init failed: {e}")
-            return False
+    # ── Loop selector ─────────────────────────────────────────────────────────
 
     def _loop(self):
+        if self._mic_queue:
+            self._loop_from_queue()
+        else:
+            self._loop_from_mic()
+
+    # ── Queue-based loop (shared mic) ─────────────────────────────────────────
+
+    def _loop_from_queue(self):
+        self.ready.set()
+        print(f"[SR] Ready from shared mic queue")
+        api_retries = 0
+        frames_per_chunk = int(44100 / 1024 * 3)  # ~3 seconds
+
+        while self._running:
+            if self._pause.is_set():
+                time.sleep(0.15)
+                continue
+
+            frames = []
+            for _ in range(frames_per_chunk):
+                try:
+                    frames.append(self._mic_queue.get(timeout=1))
+                except queue.Empty:
+                    break
+
+            if not frames:
+                continue
+
+            raw = b"".join(frames)
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as wf:
+                wf.setnchannels(2)
+                wf.setsampwidth(2)
+                wf.setframerate(44100)
+                wf.writeframes(raw)
+            buf.seek(0)
+
+            try:
+                audio = sr.AudioData(buf.read(), 44100, 2)
+                text  = self._recognizer.recognize_google(audio).lower().strip()
+                api_retries = 0
+
+                if len(text.split()) < self._min_words:
+                    continue
+                if self._pause.is_set():
+                    continue
+
+                print(f"[Heard] {text}")
+                self._dispatch(text)
+
+            except sr.UnknownValueError:
+                pass
+            except sr.RequestError as e:
+                api_retries += 1
+                print(f"[SR] API error: {e} ({api_retries}/{self._MAX_API_RETRIES})")
+                if api_retries >= self._MAX_API_RETRIES:
+                    print("[SR] Max retries — pausing 30s")
+                    time.sleep(30)
+                    api_retries = 0
+                else:
+                    time.sleep(3)
+            except Exception as e:
+                print(f"[SR] Unexpected: {e}")
+                time.sleep(1)
+
+    # ── Mic-based loop (fallback, no shared mic) ──────────────────────────────
+
+    def _loop_from_mic(self):
         try:
             with sr.Microphone() as src:
                 if not self._calibrate(src):
@@ -114,23 +165,15 @@ class WhisperListener:
                         audio = self._recognizer.listen(
                             src, timeout=2, phrase_time_limit=3
                         )
-
                         if self._pause.is_set():
-                            print("[SR] Discarding — paused during recognition")
                             continue
 
-                        text = (
-                            self._recognizer.recognize_google(audio)
-                            .lower()
-                            .strip()
-                        )
-                        api_retries = 0  # reset on success
+                        text = self._recognizer.recognize_google(audio).lower().strip()
+                        api_retries = 0
 
                         if len(text.split()) < self._min_words:
                             continue
-
                         if self._pause.is_set():
-                            print("[SR] Discarding — paused after network call")
                             continue
 
                         print(f"[Heard] {text}")
@@ -142,9 +185,9 @@ class WhisperListener:
                         pass
                     except sr.RequestError as e:
                         api_retries += 1
-                        print(f"[SR] API error: {e} (attempt {api_retries}/{self._MAX_API_RETRIES})")
+                        print(f"[SR] API error: {e} ({api_retries}/{self._MAX_API_RETRIES})")
                         if api_retries >= self._MAX_API_RETRIES:
-                            print("[SR] Max API retries reached — pausing 30 s")
+                            print("[SR] Max retries — pausing 30s")
                             time.sleep(30)
                             api_retries = 0
                         else:
@@ -155,6 +198,22 @@ class WhisperListener:
 
         except Exception as e:
             print(f"[SR] Mic open failed: {e}")
+
+    def _calibrate(self, src) -> bool:
+        print("[SR] Calibrating microphone…")
+        try:
+            self._recognizer.adjust_for_ambient_noise(src, duration=0.5)
+            if self._saved_threshold:
+                self._recognizer.energy_threshold = self._saved_threshold
+            else:
+                self._recognizer.energy_threshold = max(
+                    self._recognizer.energy_threshold * 1.3, 400
+                )
+            print(f"[SR] Ready  (threshold={self._recognizer.energy_threshold:.0f})")
+            return True
+        except Exception as e:
+            print(f"[SR] Mic init failed: {e}")
+            return False
 
     def _dispatch(self, text: str):
         if self.await_command:

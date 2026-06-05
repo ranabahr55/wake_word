@@ -9,8 +9,8 @@ import time
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TOPIC           = "uav/audio/stream"
-SAMPLE_RATE     = 16000
-CHANNELS        = 1
+SAMPLE_RATE     = 44100
+CHANNELS        = 2
 CHUNK           = 1024
 FORMAT          = pyaudio.paInt16
 
@@ -27,6 +27,7 @@ def sender():
         channels=CHANNELS,
         rate=SAMPLE_RATE,
         input=True,
+        input_device_index=0,
         frames_per_buffer=CHUNK,
     )
 
