@@ -19,7 +19,7 @@ Install dependencies:
 pip install -r requirements.txt edge-tts
 ```
 
-> `requirements.txt` includes `pygame`, `SpeechRecognition`, and `pyaudio` for microphone capture.
+> `requirements.txt` includes `pygame`, `SpeechRecognition`, `pyaudio`, and `zenoh`.
 
 ---
 
@@ -30,6 +30,13 @@ python3 main.py
 ```
 
 The app starts with a loading screen while the microphone calibrates. Once ready, it waits for a wake phrase.
+
+If you want to stream audio over Zenoh directly, use:
+
+```bash
+python3 zenoh_audio.py send
+python3 zenoh_audio.py recv
+```
 
 ---
 
@@ -126,6 +133,7 @@ Delete `config.json` to reset the app to defaults.
 | `gui.py` | Pygame rendering for the loading screen, orb, waveform, buttons, and overlays |
 | `speech_code.py` | Continuous microphone listener and fuzzy wake phrase matcher |
 | `training.py` | Microphone training workflow and energy threshold tuning |
+| `zenoh_audio.py` | Zenoh-based audio streaming sender/receiver |
 | `config.json` | Saved wake phrases, voice, and energy threshold |
 | `requirements.txt` | Base Python dependencies |
 | `livekit-wakeword/` | Placeholder folder for future LiveKit wake-word integration |
